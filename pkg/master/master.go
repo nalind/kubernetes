@@ -19,6 +19,7 @@ package master
 import (
 	"bytes"
 	_ "expvar"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/auth/authenticator"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/auth/authorizer"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/auth/handlers"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/auth/user"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master/ports"
@@ -330,6 +332,26 @@ func makeMinionRegistry(c *Config) minion.Registry {
 	return minionRegistry
 }
 
+type whoAmIHandler struct {
+	ctx *handlers.UserRequestContext
+}
+
+func (h *whoAmIHandler) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.ctx.Get(r)
+	if !ok {
+		u = new(user.DefaultInfo)
+	}
+	reply, _ := json.Marshal(u)
+	w.Header()["Content-Type"] = []string{"application/json"}
+	w.Write(reply)
+}
+
+func makeWhoAmIHandler(userContexts *handlers.UserRequestContext) func(http.ResponseWriter, *http.Request) {
+	handler := new(whoAmIHandler)
+	handler.ctx = userContexts
+	return handler.handleWhoAmI
+}
+
 // init initializes master.
 func (m *Master) init(c *Config) {
 	var userContexts = handlers.NewUserRequestContext()
@@ -381,6 +403,10 @@ func (m *Master) init(c *Config) {
 	// Register root handler.
 	// We do not register this using restful Webservice since we do not want to surface this in api docs.
 	m.mux.HandleFunc("/", apiserver.HandleIndex)
+
+	// Register a whoami handler.
+	// We do not register this using restful Webservice since we do not want to surface this in api docs.
+	m.mux.HandleFunc("/whoami", makeWhoAmIHandler(userContexts))
 
 	// TODO: use go-restful
 	apiserver.InstallValidator(m.mux, func() map[string]apiserver.Server { return m.getServersToValidate(c) })
