@@ -128,6 +128,45 @@ func (kl *Kubelet) makeBlockVolumes(pod *v1.Pod, container *v1.Container, podVol
 	return devices, nil
 }
 
+// makeHostDeviceVolumes adds character and block devices, ones which the pod
+// provides and which the container mounts, to the list of devices that we say
+// should be added to the container's device cgroup
+func (kl *Kubelet) makeHostDeviceVolumes(pod *v1.Pod, container *v1.Container) ([]kubecontainer.DeviceInfo, error) {
+	var devices []kubecontainer.DeviceInfo
+	for _, source := range pod.Spec.Volumes {
+		// we only care about hostpath volumes
+		if source.HostPath == nil || source.HostPath.Type == nil {
+			continue
+		}
+		// we only care about char and block device hostpath volumes
+		hostPathType := *source.HostPath.Type
+		if hostPathType != v1.HostPathCharDev && hostPathType != v1.HostPathBlockDev {
+			continue
+		}
+		// check that the source device path is absolute
+		hostPath := source.HostPath.Path
+		if !filepath.IsAbs(hostPath) {
+			return nil, fmt.Errorf("error Path `%s` must be an absolute path", hostPath)
+		}
+		for _, volume := range container.VolumeMounts {
+			if volume.Name == source.Name {
+				// decide whether to offer mrw or r permissions
+				permission := "mrw"
+				if volume.ReadOnly {
+					permission = "r"
+				}
+				klog.V(4).Infof("Device will be available to container %q. Path on host: %v", container.Name, hostPath)
+				devices = append(devices, kubecontainer.DeviceInfo{
+					PathOnHost:      hostPath,
+					PathInContainer: volume.MountPath,
+					Permissions:     permission,
+				})
+			}
+		}
+	}
+	return devices, nil
+}
+
 // makeMounts determines the mount points for the given container.
 func makeMounts(pod *v1.Pod, podDir string, container *v1.Container, hostName, hostDomain string, podIPs []string, podVolumes kubecontainer.VolumeMap, hu hostutil.HostUtils, subpather subpath.Interface, expandEnvs []kubecontainer.EnvVar) ([]kubecontainer.Mount, func(), error) {
 	// Kubernetes only mounts on /etc/hosts if:
@@ -466,6 +505,12 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Contai
 		return nil, nil, err
 	}
 	opts.Devices = append(opts.Devices, blkVolumes...)
+
+	hostDeviceVolumes, err := kl.makeHostDeviceVolumes(pod, container)
+	if err != nil {
+		return nil, nil, err
+	}
+	opts.Devices = append(opts.Devices, hostDeviceVolumes...)
 
 	envs, err := kl.makeEnvironmentVariables(pod, container, podIP, podIPs)
 	if err != nil {
